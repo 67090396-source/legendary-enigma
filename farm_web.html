@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<!--
+  idea_19.html - ประตูน้ำแปลงนา: ดูน้ำในคลองกับในแปลง สั่งเปิดประตูน้ำจากมือถือ
+  เปิดแบบนี้: web/idea_19.html?team=team05  (หรือพิมพ์เลขกลุ่มในช่องบนหน้า)
+  ฟัง bento-aiot/<ทีม>/# · ส่งคำสั่งเข้า bento-aiot/<ทีม>/cmd · คู่กับบอร์ด project/idea_19_paddy_gate.py
+  คีย์ telemetry: soil = น้ำในแปลงนา (VR1, ซม.) · tank = น้ำในคลองส่ง (VR4, %) · pump = ประตูน้ำ 0/1
+                  open_s = ประตูเปิดรวมกี่วินาที · low_min = น้ำในแปลงต่ำสุดตั้งแต่เริ่ม (ซม.)
+                  auto / alerts = โหมดอัตโนมัติ / การแจ้งเตือนบนบอร์ด 0/1 (เว็บซิงก์ตาม)
+  กฎฝั่งแอป: บอร์ดเงียบเกิน 15 วินาที = ขึ้น "บอร์ดเงียบ" (telemetry ส่งทุก 5 วินาที และทุก 1 วินาทีตอนประตูเปิด)
+  CSV: มีคอลัมน์ date และ time เป็นเวลาท้องถิ่นของเครื่องที่เปิดหน้านี้ + timestamp_iso_utc (UTC)
+  broker สาธารณะ ไม่มีรหัสผ่าน ใครก็อ่านและสั่งได้ ห้ามส่งของลับ
+-->
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ประตูน้ำแปลงนา</title>
+<style>
+  :root { --bg:#0d1b12; --card:#13261a; --line:#2b4a33; --ink:#eef6e4; --dim:#93a88a;
+          --water:#2f9bff; --rice:#8bd450; --mud:#6b4f2a; --warn:#f2c14e; --bad:#e5484d; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family: system-ui, "Noto Sans Thai", sans-serif; }
+  header { padding:14px 16px 4px; }
+  h1 { margin:0; font-size:1.3rem; color:var(--rice); }
+  .sub { color:var(--dim); font-size:.85rem; margin:2px 0 8px; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  input, button { font:inherit; border-radius:8px; border:1px solid var(--line); background:#1a3323; color:var(--ink); padding:8px 12px; }
+  button { cursor:pointer; } button:hover { border-color:var(--rice); }
+  button.open { background:#123d66; border-color:var(--water); }
+  button.close { background:#4a3a20; border-color:var(--mud); }
+  #status { font-size:.85rem; color:var(--dim); } #status.ok { color:var(--rice); } #status.bad { color:var(--bad); }
+  main { padding:8px 16px; display:grid; gap:12px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+  section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  h2 { margin:0 0 8px; font-size:.95rem; color:var(--rice); }
+  #field { width:100%; height:auto; display:block; }
+  #trend { width:100%; height:120px; display:block; background:#0f1f15; border-radius:6px; }
+  .legend { font-size:.75rem; color:var(--dim); }
+  .facts { display:grid; grid-template-columns: repeat(3, 1fr); gap:8px; margin-top:10px; }
+  .fact { background:#0f1f15; border-radius:8px; padding:8px; text-align:center; }
+  .fact b { display:block; font-size:1.25rem; font-variant-numeric: tabular-nums; }
+  .fact span { font-size:.72rem; color:var(--dim); }
+  #banner { margin:6px 16px 0; padding:8px 12px; border-radius:8px; display:none; }
+  #banner.show { display:block; } #banner.warn { background:#4d3d10; } #banner.mute { background:#2c302d; color:var(--dim); }
+  #log { width:100%; border-collapse:collapse; font-size:.8rem; }
+  #log td { border-top:1px solid var(--line); padding:4px; }
+  #paddyW, #canalW { transition: y .9s linear, height .9s linear; }
+  @media (prefers-reduced-motion: reduce) { #paddyW, #canalW { transition: none; } }
+  .wide { grid-column: 1 / -1; }
+  footer { padding:12px 16px 28px; color:var(--dim); font-size:.8rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ประตูน้ำแปลงนา</h1>
+  <p class="sub">น้ำในแปลงนาลดโดยไม่มีใครเห็น: ดูระดับน้ำจากมือถือ แล้วสั่งเปิดประตูน้ำจากคลองส่ง</p>
+  <div class="row">
+    <input id="team" size="10" placeholder="team05" autocomplete="off" aria-label="เลขทีม">
+    <button id="go">ต่อ</button>
+    <span id="status">ใส่เลขทีม เช่น team05 แล้วกด ต่อ</span>
+  </div>
+</header>
+<div id="banner" role="status"></div>
+<main>
+  <section>
+    <h2>ภาพตัดคลองกับแปลงนา</h2>
+    <svg id="field" viewBox="0 0 360 170" aria-label="ภาพตัดคลอง ประตูน้ำ และแปลงนา">
+      <rect x="0" y="150" width="360" height="20" fill="#6b4f2a"/>
+      <rect x="10" y="20" width="90" height="130" fill="#1a3323" stroke="#2b4a33"/>
+      <rect id="canalW" x="10" y="150" width="90" height="0" fill="#2f9bff"/>
+      <rect x="150" y="70" width="200" height="80" fill="#1a3323" stroke="#2b4a33"/>
+      <rect id="paddyW" x="150" y="150" width="200" height="0" fill="#2f9bff" opacity=".75"/>
+      <line id="lowLine" x1="150" x2="350" y1="122" y2="122" stroke="#f2c14e" stroke-dasharray="5 4"/>
+      <line id="highLine" x1="150" x2="350" y1="86" y2="86" stroke="#e5484d" stroke-dasharray="3 4"/>
+      <g id="rice" stroke="#8bd450" stroke-width="2"></g>
+      <rect x="100" y="60" width="50" height="90" fill="#0d1b12"/>
+      <rect id="gate" x="118" y="60" width="14" height="90" fill="#6b4f2a" stroke="#93a88a"/>
+      <path id="flow" d="M100 140 L150 140" stroke="#2f9bff" stroke-width="6" opacity="0"/>
+      <text x="55" y="14" fill="#93a88a" font-size="11" text-anchor="middle">คลองส่ง</text>
+      <text x="125" y="54" fill="#93a88a" font-size="11" text-anchor="middle">ประตู</text>
+      <text x="250" y="64" fill="#93a88a" font-size="11" text-anchor="middle">แปลงนา (เหลือง = น้ำต่ำ / แดง = น้ำสูง)</text>
+    </svg>
+    <div class="facts">
+      <div class="fact"><b id="canalN">--</b><span>น้ำในคลองส่ง (%)</span></div>
+      <div class="fact"><b id="paddyN">--</b><span>น้ำในแปลง (ซม.)</span></div>
+      <div class="fact"><b id="gateN">--</b><span>ประตูน้ำ</span></div>
+    </div>
+  </section>
+  <section>
+    <h2>ระดับน้ำย้อนหลัง (ประมาณ 5 นาที)</h2>
+    <svg id="trend" viewBox="0 0 300 100" preserveAspectRatio="none" aria-label="กราฟระดับน้ำ">
+      <line id="trendLowLine" x1="0" x2="300" y1="65" y2="65" stroke="#f2c14e" stroke-dasharray="4 4" stroke-width="1"/>
+      <line id="trendHighLine" x1="0" x2="300" y1="20" y2="20" stroke="#e5484d" stroke-dasharray="3 4" stroke-width="1"/>
+      <polyline id="lineCanal" fill="none" stroke="#2f9bff" stroke-width="2"/>
+      <polyline id="linePaddy" fill="none" stroke="#8bd450" stroke-width="2"/>
+    </svg>
+    <div class="legend">ฟ้า = คลองส่ง (%) · เขียว = แปลงนา (ซม.) · เหลือง = น้ำต่ำกว่า 2 ซม. · แดง = น้ำตั้งแต่ 5 ซม.</div>
+    <div class="facts">
+      <div class="fact"><b id="openS">--</b><span>ประตูเปิดรวม (วินาที)</span></div>
+      <div class="fact"><b id="lowMin">--</b><span>น้ำต่ำสุด (ซม.)</span></div>
+      <div class="fact"><b id="seen">--</b><span>ข้อมูลล่าสุด</span></div>
+    </div>
+  </section>
+  <section class="wide">
+    <h2>สั่งประตูน้ำ (ควบคุมด้วยมือผ่านเว็บ)</h2>
+    <div class="row">
+      <button class="open" data-cmd='{"cmd":"pump","on":1,"sec":10}'>เปิดประตูน้ำ 10 วินาที</button>
+      <button class="open" data-cmd='{"cmd":"pump","on":1,"sec":30}'>เปิด 30 วินาที (สูงสุด)</button>
+      <button class="close" data-cmd='{"cmd":"pump","on":0}'>ปิดประตูน้ำ</button>
+      <button id="autoToggle" class="open">โหมดอัตโนมัติ: เปิด</button>
+      <button id="alertToggle" class="open" aria-pressed="true">การแจ้งเตือน: เปิด</button>
+      <button id="soundToggle" class="close" aria-pressed="false">เสียงแจ้งเตือน: ปิด</button>
+      <button data-cmd='{"cmd":"beep"}'>เรียกคนที่นา</button>
+      <input id="say" maxlength="20" placeholder="ข้อความอังกฤษ เช่น GATE OPEN">
+      <button id="sayBtn">ส่งข้อความ</button>
+    </div>
+    <p class="legend">ระดับน้ำจำลองจะเพิ่มเมื่อประตูเปิด (ประมาณ 0.25 ซม./วินาที) และค่อย ๆ ลดเมื่อปิด (ประมาณ 0.02 ซม./วินาที) · ปุ่ม AUTO ใช้เปิด/ปิดการสั่งงานอัตโนมัติ ส่วนปุ่มเปิด/ปิดประตูยังใช้สั่งเองได้</p>
+    <p class="legend">กฎความปลอดภัย: คลองส่งต่ำกว่า 10% ห้ามเปิด · น้ำในนาตั้งแต่ 5 ซม. ห้ามเปิด · น้ำในนาต่ำกว่า 2 ซม. และคลองส่งเพียงพอจะเปิดอัตโนมัติ 10 วินาที โดยเว้นอย่างน้อย 60 วินาทีก่อนรอบใหม่ · คำสั่งเปิดสูงสุด 30 วินาที · SW6 บนบอร์ดเปิด/ปิดเอง และ SW5 ปิดฉุกเฉิน</p>
+  </section>
+  <section class="wide">
+    <h2>บันทึก <button id="csv" style="float:right;padding:4px 10px">ดาวน์โหลด CSV</button></h2>
+    <table id="log"><tbody></tbody></table>
+  </section>
+</main>
+<footer>
+  <p>ต่อยอดหน้านี้เองได้ (แก้ด้วยตัวเองหรือ vibe coding โดยวาง s2/app/MQTT_CONTRACT_th.md ให้ AI ก่อน)</p>
+  <p>หน้านี้เป็นจุดเริ่มต้นเท่านั้น ห้ามส่งตามนี้ ทีมต้องต่อยอดเองอย่างน้อย 3 อย่าง (ดู PROJECT_BRIEF_lite_th.md)</p>
+</footer>
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.16.0/dist/mqtt.min.js"
+        integrity="sha384-9WWboT9UtuPFRlOLq4FygQkcJxzYcpz8SXGkNyCEXM+44n14xzjNlrRKYZwuF/A6" crossorigin="anonymous"
+        onerror="var s=document.createElement('script');s.src='https://unpkg.com/mqtt@5.16.0/dist/mqtt.min.js';s.integrity='sha384-9WWboT9UtuPFRlOLq4FygQkcJxzYcpz8SXGkNyCEXM+44n14xzjNlrRKYZwuF/A6';s.crossOrigin='anonymous';document.head.appendChild(s);"></script>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const BROKER_URL = "wss://broker.hivemq.com:8884/mqtt";
+const ROOT = "bento-aiot";
+const LOW = 2, HIGH = 5, CANAL_MIN = 10; // น้ำในคลองส่งเป็น %; ต้องตรงกับ TANK_MIN=10 บนบอร์ด
+const SILENT_MS = 15000, TREND_MS = 300000, MAX_ROWS = 50000, SYNC_HOLD_MS = 6000;
+let client = null, lastSeen = 0, team = new URLSearchParams(location.search).get("team") || "team05";
+const rows = [], trend = [], recentSent = [];
+const syncHold = { auto: 0, alerts: 0 };   // หลังกดสวิตช์เอง รอบอร์ดยืนยันก่อนค่อยซิงก์ตาม telemetry (กันปุ่มกระพริบ)
+let libTries = 0, lastTelLog = 0;
+function pushRow(r) { rows.push(r); if (rows.length > MAX_ROWS) rows.splice(0, rows.length - MAX_ROWS); }
+let autoEnabled = true;
+let alertsEnabled = true, soundEnabled = false, audioCtx = null, activeAlert = "", activeAlertLevel = "", boardSilentAlert = false;
+
+// เสียงผ่านลำโพงของอุปกรณ์ที่เปิดเว็บ ต้องกดเปิดเสียงเองก่อนตามข้อจำกัดของเบราว์เซอร์
+function playAlertSound(level) {
+  if (!soundEnabled) return;
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    if (!audioCtx) audioCtx = new Ctx();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+    const pattern = level === "red" ? [880, 0, 880, 0, 880] : level === "yellow" ? [660, 0, 660] : [440];
+    let start = audioCtx.currentTime;
+    pattern.forEach((freq) => {
+      if (freq) {
+        const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+        osc.type = "sine"; osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.0001, start);
+        gain.gain.exponentialRampToValueAtTime(0.18, start + 0.015);
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.14);
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        osc.start(start); osc.stop(start + 0.15);
+      }
+      start += 0.22;
+    });
+  } catch (_) { /* อุปกรณ์หรือเบราว์เซอร์อาจไม่รองรับเสียง */ }
+}
+function setAlertSoundState(key, level) {
+  if (key !== activeAlert) {
+    activeAlert = key;
+    activeAlertLevel = key ? level : "";
+    if (key && alertsEnabled) playAlertSound(level);
+  } else if (key) {
+    activeAlertLevel = level;
+  }
+}
+// หากความผิดปกติยังคงอยู่ ให้เล่นเสียงซ้ำทุก 5 วินาที
+setInterval(() => {
+  if (alertsEnabled && soundEnabled && activeAlert) playAlertSound(activeAlertLevel || "yellow");
+}, 5000);
+
+function num(v, lo, hi) { return (typeof v === "number" && isFinite(v) && v >= lo && v <= hi) ? v : null; }
+function okTeam(t) { return /^team[a-z0-9_]{2,20}$/.test(t) && t !== "teamXX" && t !== "team00"; }
+function setStatus(text, cls) { const s = $("status"); s.textContent = text; s.className = cls || ""; }
+function banner(text, cls) { const b = $("banner"); b.textContent = text || ""; b.className = text ? "show " + cls : ""; }
+function now() { return new Date().toLocaleTimeString("th-TH"); }
+
+// ต้นข้าวในแปลง วาดครั้งเดียว
+(function drawRice() {
+  const g = $("rice"), ns = "http://www.w3.org/2000/svg";
+  for (let x = 162; x < 350; x += 16) {
+    const l = document.createElementNS(ns, "line");
+    l.setAttribute("x1", String(x)); l.setAttribute("x2", String(x + 3));
+    l.setAttribute("y1", "150"); l.setAttribute("y2", "96");
+    g.appendChild(l);
+  }
+})();
+
+function drawField(canal, paddy, open) {
+  const ch = canal === null ? 0 : canal * 1.3, ph = paddy === null ? 0 : paddy * 8;
+  // เส้นเกณฑ์เลื่อนตามค่าที่ตั้งไว้ ไม่ใช้ค่าคงที่ 30% อีกต่อไป
+  const lowY = 150 - LOW * 8, highY = 150 - HIGH * 8;
+  $("lowLine").setAttribute("y1", String(lowY)); $("lowLine").setAttribute("y2", String(lowY));
+  $("highLine").setAttribute("y1", String(highY)); $("highLine").setAttribute("y2", String(highY));
+  const geom = (id, y, h) => { const e = $(id); e.setAttribute("y", String(y)); e.setAttribute("height", String(h)); e.style.y = y + "px"; e.style.height = h + "px"; };
+  geom("canalW", 150 - ch, ch);                // style ด้วย เพื่อให้น้ำเลื่อนขึ้นลงนุ่ม ๆ ระหว่างข้อมูลแต่ละรอบ
+  geom("paddyW", 150 - ph, ph);
+  $("gate").setAttribute("y", open === 1 ? "20" : "60");      // ประตูยกขึ้นเมื่อเปิด
+  $("flow").setAttribute("opacity", open === 1 ? "0.9" : "0");
+  $("canalN").textContent = canal === null ? "--" : canal.toFixed(1) + "%";
+  $("paddyN").textContent = paddy === null ? "--" : String(paddy) + " ซม.";
+  $("paddyN").style.color = paddy !== null && paddy >= HIGH ? "var(--bad)" :
+    paddy !== null && paddy < LOW ? "var(--warn)" : "";
+  $("gateN").textContent = open === 1 ? "เปิด" : open === 0 ? "ปิด" : "--";
+  $("gateN").style.color = open === 1 ? "var(--water)" : "";
+}
+
+function drawTrend() {
+  const lowY = 100 - LOW * 10, highY = 100 - HIGH * 10;
+  $("trendLowLine").setAttribute("y1", String(lowY)); $("trendLowLine").setAttribute("y2", String(lowY));
+  $("trendHighLine").setAttribute("y1", String(highY)); $("trendHighLine").setAttribute("y2", String(highY));
+  const tStart = Date.now() - TREND_MS;        // แกนเวลาจริง 5 นาที (ข้อมูลถี่ 1 หรือ 5 วินาทีก็วาดถูกช่วง)
+  const pts = (key) => trend.filter((p) => p[key] !== null && p.t >= tStart)
+    .map((p) => ((p.t - tStart) / TREND_MS * 300).toFixed(1) + "," + (key === "canal" ? 100 - p[key] : 100 - p[key] * 10).toFixed(1)).join(" ");
+  $("lineCanal").setAttribute("points", pts("canal"));
+  $("linePaddy").setAttribute("points", pts("paddy"));
+}
+
+function addLog(kind, text) {
+  const tb = $("log").tBodies[0], tr = document.createElement("tr");
+  [now(), kind, text].forEach((v) => { const td = document.createElement("td"); td.textContent = v; tr.appendChild(td); });
+  tb.insertBefore(tr, tb.firstChild);
+  while (tb.rows.length > 20) tb.deleteRow(-1);
+}
+
+function onTelemetry(o) {
+  boardSilentAlert = false;
+  const paddy = num(o.soil, 0, 10), canal = num(o.tank, 0, 100);
+  const open = o.pump === 1 ? 1 : o.pump === 0 ? 0 : null;
+  const openS = num(o.open_s, 0, 1e7), lowMin = num(o.low_min, 0, 10);
+  if ((o.auto === 0 || o.auto === 1) && Date.now() > syncHold.auto) autoEnabled = o.auto === 1;
+  updateAutoButton();
+  if ((o.alerts === 0 || o.alerts === 1) && Date.now() > syncHold.alerts && alertsEnabled !== (o.alerts === 1)) {
+    alertsEnabled = o.alerts === 1; activeAlert = ""; activeAlertLevel = ""; updateAlertButton();
+  }
+  // ตรวจว่าเกณฑ์ที่บอร์ดรายงานตรงกับเว็บหรือไม่
+  const thresholdMismatch =
+    (num(o.soil_dry, 0, 10) !== null && num(o.soil_dry, 0, 10) !== LOW) ||
+    (num(o.soil_wet_max, 0, 10) !== null && num(o.soil_wet_max, 0, 10) !== HIGH) ||
+    (num(o.tank_min, 0, 10) !== null && num(o.tank_min, 0, 10) !== CANAL_MIN);
+  drawField(canal, paddy, open);
+  trend.push({ t: Date.now(), canal, paddy });
+  while (trend.length && trend[0].t < Date.now() - TREND_MS) trend.shift();
+  drawTrend();
+  $("openS").textContent = openS === null ? "--" : String(openS);
+  $("lowMin").textContent = lowMin === null ? "--" : String(lowMin) + " ซม.";
+  $("seen").textContent = now();
+  if (!alertsEnabled) { banner("", ""); setAlertSoundState("", ""); }
+  else if (thresholdMismatch) { banner("คำเตือน: เกณฑ์บนบอร์ดไม่ตรงกับหน้าเว็บ โปรดตรวจค่าตั้งต้น", "warn"); setAlertSoundState("threshold_mismatch", "red"); }
+  else if (paddy !== null && paddy >= HIGH) { banner("น้ำในนาสูง " + paddy + " ซม.: ห้ามเปิดประตูน้ำ บอร์ดจะปิดประตูกันล้นให้", "warn"); setAlertSoundState("paddy_high", "red"); }
+  else if (canal !== null && canal < CANAL_MIN) { banner("คลองส่งเหลือ " + canal + "%: ระบบจะไม่เปิดและจะปิดประตูน้ำ", "warn"); setAlertSoundState("canal_low", "red"); }
+  else if (paddy !== null && paddy < LOW && open !== 1) { banner("น้ำในนาต่ำกว่า " + LOW + " ซม.: ระบบจะพิจารณาเปิดอัตโนมัติเมื่อคลองเพียงพอ", "warn"); setAlertSoundState("paddy_low", "yellow"); }
+  else { banner("", ""); setAlertSoundState("", ""); }
+  pushRow([new Date().toISOString(), "telemetry", num(o.n, 0, 1e9), paddy, canal, open, autoEnabled ? 1 : 0, openS, lowMin, o.model || ""]);
+  if (Date.now() - lastTelLog >= 4500) {      // ตารางบนจอไม่ถี่กว่า 5 วินาที (CSV เก็บครบทุกรอบ)
+    lastTelLog = Date.now();
+    addLog("telemetry", "นา " + (paddy ?? "-") + " ซม. คลองส่ง " + (canal ?? "-") + "% ประตู" + (open === 1 ? "เปิด" : "ปิด"));
+  }
+}
+
+function onMessage(kind, o) {
+  if (kind !== "cmd") lastSeen = Date.now();   // คำสั่งของแอปเองไม่ได้แปลว่าบอร์ดยังอยู่
+  if (kind === "telemetry") { onTelemetry(o); return; }
+  if (kind === "cmd") {                        // คำสั่งที่หน้านี้ส่งเอง broker ส่งสำเนากลับมา: ไม่บันทึกซ้ำ
+    const full = JSON.stringify(o), i = recentSent.findIndex((x) => x.s === full && Date.now() - x.t < 5000);
+    if (i >= 0) { recentSent.splice(i, 1); return; }
+  }
+  const raw = JSON.stringify(o).slice(0, 120);
+  addLog(kind === "cmd" ? "คำสั่ง" : kind.slice(0, 12), raw);
+  pushRow([new Date().toISOString(), kind, "", "", "", "", autoEnabled ? 1 : 0, "", "", raw]);
+}
+
+// กฎฝั่งแอป: บอร์ดเงียบ
+setInterval(() => {
+  if (!client || !client.connected || !lastSeen) return;
+  const gap = Date.now() - lastSeen;
+  if (gap > SILENT_MS) {
+    if (alertsEnabled) {
+      banner("บอร์ดที่นาเงียบมา " + Math.round(gap / 1000) + " วินาที: ไม่รู้ว่าประตูเปิดหรือปิด ไปดูที่แปลง", "mute");
+      if (!boardSilentAlert) { boardSilentAlert = true; setAlertSoundState("board_silent", "red"); }
+    }
+  }
+}, 1000);
+
+function connect() {
+  boardSilentAlert = false;
+  team = $("team").value.trim();
+  if (!okTeam(team)) { setStatus("ใส่เลขทีม เช่น team05", "bad"); return; }
+  history.replaceState(null, "", "?team=" + encodeURIComponent(team));
+  if (client) client.end(true);
+  if (typeof window.mqtt === "undefined" || typeof window.mqtt.connect !== "function") {
+    if (libTries++ < 10) { setStatus("กำลังโหลดไลบรารี MQTT...", ""); setTimeout(connect, 1500); }
+    else setStatus("โหลดไลบรารี MQTT ไม่ได้: ตรวจอินเทอร์เน็ต/CDN แล้วรีเฟรช", "bad");
+    return;
+  }
+  libTries = 0;
+  setStatus("กำลังต่อ broker ผ่าน WebSocket...", "");
+  activeAlert = "";
+  try {
+    client = mqtt.connect(BROKER_URL, {
+      clientId: "paddy-" + team + "-" + Math.random().toString(16).slice(2, 12),
+      connectTimeout: 20000, reconnectPeriod: 3000, clean: true,
+      keepalive: 30
+    });
+  } catch (e) {
+    setStatus("เริ่ม MQTT ไม่สำเร็จ: " + (e && e.message ? e.message : "ตรวจการตั้งค่า"), "bad");
+    return;
+  }
+  let connectedAtLeastOnce = false;
+  client.on("connect", () => {
+    connectedAtLeastOnce = true;
+    setStatus("ต่อ broker แล้ว · team " + team + " · ฟัง " + ROOT + "/" + team + "/#", "ok");
+    client.subscribe(ROOT + "/" + team + "/#", (err) => {
+      if (err) setStatus("ต่อ broker แล้ว แต่สมัครรับ topic ไม่สำเร็จ", "bad");
+    });
+  });
+  client.on("reconnect", () => setStatus("กำลังเชื่อมต่อใหม่...", ""));
+  client.on("offline", () => setStatus("MQTT ออฟไลน์ · กำลังลองใหม่", "bad"));
+  client.on("close", () => { if (connectedAtLeastOnce) setStatus("การเชื่อมต่อปิด · กำลังลองใหม่", "bad"); });
+  client.on("error", (err) => setStatus("ต่อ broker ไม่ได้: ตรวจอินเทอร์เน็ต/พอร์ต WebSocket 8884", "bad"));
+  client.on("message", (topic, payload) => {
+    let o;
+    try { o = JSON.parse(payload.toString()); } catch (e) { return; }
+    if (!o || typeof o !== "object" || Array.isArray(o)) return;
+    onMessage(String(topic.split("/").pop()), o);
+  });
+}
+
+function send(obj) {
+  if (!client || !client.connected) { setStatus("ยังไม่ได้ต่อ broker", "bad"); return; }
+  const stamp = new Date().toISOString();
+  recentSent.push({ s: JSON.stringify(obj), t: Date.now() });
+  if (recentSent.length > 20) recentSent.shift();
+  client.publish(ROOT + "/" + team + "/cmd", JSON.stringify(obj));
+  pushRow([stamp, "command_sent", "", "", "", "", autoEnabled ? 1 : 0, "", "", JSON.stringify(obj)]);
+  addLog("ส่งคำสั่ง", JSON.stringify(obj));
+}
+function updateAutoButton() {
+  const b = $("autoToggle");
+  if (!b) return;
+  b.textContent = "โหมดอัตโนมัติ: " + (autoEnabled ? "เปิด" : "ปิด");
+  b.className = autoEnabled ? "open" : "close";
+}
+function updateAlertButton() {
+  const b = $("alertToggle");
+  b.textContent = "การแจ้งเตือน: " + (alertsEnabled ? "เปิด" : "ปิด");
+  b.className = alertsEnabled ? "open" : "close";
+  b.setAttribute("aria-pressed", alertsEnabled ? "true" : "false");
+}
+$("alertToggle").addEventListener("click", () => {
+  alertsEnabled = !alertsEnabled;
+  syncHold.alerts = Date.now() + SYNC_HOLD_MS;
+  updateAlertButton();
+  activeAlert = "";
+  activeAlertLevel = "";
+  if (!alertsEnabled) { banner("", ""); boardSilentAlert = false; }
+  send({ cmd: "alerts", on: alertsEnabled ? 1 : 0 });
+});
+
+$("soundToggle").addEventListener("click", async () => {
+  soundEnabled = !soundEnabled;
+  const b = $("soundToggle");
+  b.textContent = "เสียงแจ้งเตือน: " + (soundEnabled ? "เปิด" : "ปิด");
+  b.className = soundEnabled ? "open" : "close";
+  b.setAttribute("aria-pressed", soundEnabled ? "true" : "false");
+  if (soundEnabled) {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (Ctx) { if (!audioCtx) audioCtx = new Ctx(); await audioCtx.resume(); playAlertSound("yellow"); }
+      else { soundEnabled = false; b.textContent = "อุปกรณ์ไม่รองรับเสียง"; b.className = "close"; }
+    } catch (_) { soundEnabled = false; b.textContent = "เปิดเสียงไม่สำเร็จ"; b.className = "close"; }
+  }
+});
+
+$("autoToggle").addEventListener("click", () => {
+  autoEnabled = !autoEnabled;
+  syncHold.auto = Date.now() + SYNC_HOLD_MS;
+  updateAutoButton();
+  send({ cmd: "auto", on: autoEnabled ? 1 : 0 });
+});
+
+document.querySelectorAll("button[data-cmd]").forEach((b) => b.addEventListener("click", () => send(JSON.parse(b.dataset.cmd))));
+$("sayBtn").addEventListener("click", () => {
+  const text = $("say").value.replace(/[^ -~]/g, "").toUpperCase().slice(0, 20);
+  if (text) send({ cmd: "say", text });
+});
+$("go").addEventListener("click", connect);
+$("team").addEventListener("keydown", (e) => { if (e.key === "Enter") connect(); });
+
+$("csv").addEventListener("click", () => {
+  if (!rows.length) { setStatus("ยังไม่มีข้อมูลให้ดาวน์โหลด", "bad"); return; }
+  const p2 = (n) => String(n).padStart(2, "0");
+  const local = (iso) => { const d = new Date(iso); return [d.getFullYear() + "-" + p2(d.getMonth() + 1) + "-" + p2(d.getDate()), p2(d.getHours()) + ":" + p2(d.getMinutes()) + ":" + p2(d.getSeconds())]; };
+  const head = ["date", "time", "timestamp_iso_utc", "event_type", "sequence", "paddy_cm", "canal_percent", "gate_open", "auto_enabled", "gate_open_total_s", "paddy_min_cm", "details"];
+  const esc = (v) => { const s = v === null || v === undefined ? "" : String(v); return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const lines = [head.join(",")].concat(rows.map((r) => local(r[0]).concat(r).map(esc).join(",")));
+  const blob = new Blob(["\uFEFF" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  const nowL = local(new Date().toISOString());
+  a.download = "paddy_gate_" + (team || "team") + "_" + nowL[0] + "_" + nowL[1].replace(/:/g, "") + ".csv";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+
+$("team").value = team;
+setInterval(drawTrend, 5000);                  // กราฟเลื่อนตามเวลาแม้ไม่มีข้อมูลเข้า
+drawField(null, null, null);
+if (okTeam(team)) connect();
+</script>
+</body>
+</html>
